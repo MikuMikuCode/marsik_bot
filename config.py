@@ -1,2 +1,3 @@
-BOT_TOKEN = "API_TOKEN"
+import os
 
+TOKEN = os.getenv("BOT_TOKEN")

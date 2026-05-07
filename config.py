@@ -1,3 +1,3 @@
 import os
 
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("API_TOKEN")

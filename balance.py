@@ -1,19 +1,29 @@
+from datetime import datetime
+
 import aiosqlite
 from telegram import Update
-from telegram.ext import MessageHandler, filters, ConversationHandler, CommandHandler, ContextTypes
+from telegram.ext import CallbackQueryHandler, MessageHandler, filters, ConversationHandler, CommandHandler, ContextTypes
 
 CHANGE_TAGS, CHANGE_AMOUNT, CHANGE_REASON = range(3)
 
 def register_balance_handlers(app, DB_PATH):
     async def change_balance_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if query:
+            await query.answer()
+
         telegram_id = update.effective_user.id
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT role FROM users WHERE telegram_id = ?", (telegram_id,)) as cursor:
-                role = (await cursor.fetchone())[0]
+                role_row = await cursor.fetchone()
+                role = role_row[0] if role_row else "user"
         if role not in ["senior_user", "admin"]:
-            await update.message.reply_text("Недостаточно прав.")
+            target = query.message if query else update.message
+            await target.reply_text("Недостаточно прав.")
             return ConversationHandler.END
-        await update.message.reply_text("Введите теги пользователей через запятую (например: @user1, @user2):")
+
+        target = query.message if query else update.message
+        await target.reply_text("Введите теги пользователей через запятую (например: @user1, @user2):")
         return CHANGE_TAGS
 
     async def get_change_tags(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -50,22 +60,54 @@ def register_balance_handlers(app, DB_PATH):
         reason = update.message.text
         tags = context.user_data["change_tags"]
         amount = context.user_data["change_amount"]
+        actor_id = update.effective_user.id
 
         await update.message.reply_text("⏳ Обрабатываю транзакции...")
 
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    actor_tag TEXT,
+                    target_tag TEXT,
+                    amount INTEGER NOT NULL,
+                    comment TEXT
+                )
+            """)
+            async with db.execute("SELECT tg_tag FROM users WHERE telegram_id = ?", (actor_id,)) as cursor:
+                actor_row = await cursor.fetchone()
+                actor_tag = actor_row[0] if actor_row and actor_row[0] else f"id:{actor_id}"
+
             for tag, target_id in tags:
                 async with db.execute("SELECT balance FROM users WHERE telegram_id = ?", (target_id,)) as cursor:
                     balance = (await cursor.fetchone())[0] or 0
                     new_balance = max(0, balance + amount)
+                    actual_amount = new_balance - balance
                     await db.execute("UPDATE users SET balance = ? WHERE telegram_id = ?", (new_balance, target_id))
+                    await db.execute(
+                        """
+                        INSERT INTO transactions (created_at, actor_tag, target_tag, amount, comment)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            datetime.now().strftime("%d.%m.%Y %H:%M"),
+                            actor_tag,
+                            tag,
+                            actual_amount,
+                            reason,
+                        ),
+                    )
             await db.commit()
 
         await update.message.reply_text("✅ Транзакции завершены.")
         return ConversationHandler.END
 
     conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("Изменить баллы"), change_balance_start)],
+        entry_points=[
+            MessageHandler(filters.Regex("^Изменить баллы$"), change_balance_start),
+            CallbackQueryHandler(change_balance_start, pattern="^balance_change$"),
+        ],
         states={
             CHANGE_TAGS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_change_tags)],
             CHANGE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_change_amount)],

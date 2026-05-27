@@ -3,15 +3,18 @@ from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.ext import MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes, CommandHandler
 
 CHANGE_TAGS = 0
+TRANSACTIONS_PER_PAGE = 15
 
 def register_statistics_handlers(app, DB_PATH):
-
-    async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        telegram_id = update.effective_user.id
+    async def get_user_role(telegram_id):
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT role FROM users WHERE telegram_id = ?", (telegram_id,)) as cursor:
                 row = await cursor.fetchone()
-                role = row[0] if row else "user"
+                return row[0] if row else "user"
+
+    async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        telegram_id = update.effective_user.id
+        role = await get_user_role(telegram_id)
         if role not in ["senior_user", "admin"]:
             await update.message.reply_text("Недостаточно прав.")
             return
@@ -24,8 +27,69 @@ def register_statistics_handlers(app, DB_PATH):
         for i, (name, tg_tag, balance) in enumerate(rows, 1):
             text += f"{i}. {name} | {tg_tag} — {balance} MT\n"
 
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Конкретный пользователь", callback_data="user_stats")]])
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Конкретный пользователь", callback_data="user_stats")],
+            [InlineKeyboardButton("Транзакции", callback_data="transactions_0")]
+        ])
         await update.message.reply_text(text, reply_markup=keyboard)
+
+    async def show_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+
+        telegram_id = update.effective_user.id
+        role = await get_user_role(telegram_id)
+        if role not in ["senior_user", "admin"]:
+            await query.message.reply_text("Недостаточно прав.")
+            return
+
+        page = int(query.data.rsplit("_", 1)[1])
+        offset = page * TRANSACTIONS_PER_PAGE
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    actor_tag TEXT,
+                    target_tag TEXT,
+                    amount INTEGER NOT NULL,
+                    comment TEXT
+                )
+            """)
+            async with db.execute("SELECT COUNT(*) FROM transactions") as cursor:
+                total = (await cursor.fetchone())[0]
+            async with db.execute(
+                """
+                SELECT created_at, actor_tag, target_tag, amount, comment
+                FROM transactions
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (TRANSACTIONS_PER_PAGE, offset),
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        total_pages = max(1, (total + TRANSACTIONS_PER_PAGE - 1) // TRANSACTIONS_PER_PAGE)
+        text = f"Журнал транзакций — лист {page + 1}/{total_pages}\n\n"
+        if not rows:
+            text += "Транзакций пока нет."
+        else:
+            for created_at, actor_tag, target_tag, amount, comment in rows:
+                amount_text = f"+{amount}" if amount > 0 else str(amount)
+                text += f"{created_at}, {actor_tag or '-'}, {target_tag or '-'}, {amount_text} MT\n"
+                text += f"{comment or '-'}\n\n"
+
+        buttons = []
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("Назад", callback_data=f"transactions_{page - 1}"))
+        if page + 1 < total_pages:
+            nav_buttons.append(InlineKeyboardButton("Вперед", callback_data=f"transactions_{page + 1}"))
+        if nav_buttons:
+            buttons.append(nav_buttons)
+
+        await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
 
     async def user_stats_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -66,4 +130,5 @@ def register_statistics_handlers(app, DB_PATH):
     )
 
     app.add_handler(MessageHandler(filters.Regex("Статистика"), show_statistics))
+    app.add_handler(CallbackQueryHandler(show_transactions, pattern="^transactions_[0-9]+$"))
     app.add_handler(stats_conv)

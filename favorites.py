@@ -5,17 +5,13 @@ from telegram.ext import MessageHandler, CallbackQueryHandler, filters, Conversa
 FAV_ACTION, FAV_TAGS = range(2)
 
 def register_favorites_handlers(app, DB_PATH):
-
-    async def show_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        telegram_id = update.effective_user.id
+    async def get_user_role(telegram_id):
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT role FROM users WHERE telegram_id = ?", (telegram_id,)) as cursor:
                 role_row = await cursor.fetchone()
-                role = role_row[0] if role_row else "user"
-        if role not in ["senior_user", "admin"]:
-            await update.message.reply_text("Недостаточно прав.")
-            return
+                return role_row[0] if role_row else "user"
 
+    async def get_favorites_text(telegram_id):
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("""
                 SELECT u.name, u.tg_tag, u.balance, u.position
@@ -31,12 +27,40 @@ def register_favorites_handlers(app, DB_PATH):
         else:
             for name, tg_tag, balance, position in rows:
                 text += f"{name} | {tg_tag}\n{balance} MT\n{position}\n---\n"
+        return text
 
+    async def show_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        telegram_id = update.effective_user.id
+        role = await get_user_role(telegram_id)
+        if role not in ["senior_user", "admin"]:
+            await update.message.reply_text("Недостаточно прав.")
+            return
+
+        text = await get_favorites_text(telegram_id)
+        text += '\nЧтобы начислить или вычесть баллы у пользователя, нажмите "Изменить баланс". Изменять баланс можно всем'
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Редактировать", callback_data="fav_edit")],
+            [InlineKeyboardButton("Изменить баланс", callback_data="balance_change")]
+        ])
+        await update.message.reply_text(text, reply_markup=keyboard)
+
+    async def show_favorites_editor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+
+        telegram_id = update.effective_user.id
+        role = await get_user_role(telegram_id)
+        if role not in ["senior_user", "admin"]:
+            await query.message.reply_text("Недостаточно прав.")
+            return ConversationHandler.END
+
+        text = await get_favorites_text(telegram_id)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Добавить", callback_data="fav_add")],
             [InlineKeyboardButton("Убрать", callback_data="fav_remove")]
         ])
-        await update.message.reply_text(text, reply_markup=keyboard)
+        await query.message.reply_text(text, reply_markup=keyboard)
 
     async def fav_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -103,11 +127,17 @@ def register_favorites_handlers(app, DB_PATH):
 
     # --- ConversationHandler ---
     fav_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("Избранное"), show_favorites),
-                      CallbackQueryHandler(fav_action, pattern="fav_(add|remove)")],
+        entry_points=[
+            MessageHandler(filters.Regex("^Баллы$"), show_points),
+            CallbackQueryHandler(show_favorites_editor, pattern="^fav_edit$"),
+            CallbackQueryHandler(fav_action, pattern="^fav_(add|remove)$"),
+        ],
         states={
             FAV_TAGS: [MessageHandler(filters.TEXT & ~filters.COMMAND, fav_tags)]
         },
-        fallbacks=[CommandHandler("cancel", cancel_fav)]
+        fallbacks=[
+            CommandHandler("cancel", cancel_fav),
+            CallbackQueryHandler(cancel_fav, pattern="^cancel$"),
+        ]
     )
     app.add_handler(fav_conv)

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import aiosqlite
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.ext import MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler, CommandHandler
@@ -109,6 +111,32 @@ def register_rewards_handlers(app, DB_PATH):
 
             new_balance = balance - cost
             await db.execute("UPDATE users SET balance = ? WHERE telegram_id = ?", (new_balance, telegram_id))
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    actor_tag TEXT,
+                    target_tag TEXT,
+                    amount INTEGER NOT NULL,
+                    comment TEXT
+                )
+            """)
+            async with db.execute("SELECT tg_tag FROM users WHERE telegram_id = ?", (telegram_id,)) as cursor:
+                tag_row = await cursor.fetchone()
+                user_tag = tag_row[0] if tag_row and tag_row[0] else f"id:{telegram_id}"
+            await db.execute(
+                """
+                INSERT INTO transactions (created_at, actor_tag, target_tag, amount, comment)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now().strftime("%d.%m.%Y %H:%M"),
+                    user_tag,
+                    user_tag,
+                    -cost,
+                    f"Покупка награды: {reward_name}",
+                ),
+            )
             await db.commit()
 
         await query.message.reply_text(f"Спасибо за покупку! 🎉\nНовый баланс: {new_balance} 🪙")

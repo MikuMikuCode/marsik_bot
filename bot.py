@@ -13,6 +13,7 @@ from statistics import register_statistics_handlers
 from post import register_post_handlers
 from favorites import register_favorites_handlers 
 from stickers import register_sticker_handlers
+from admin_tools import register_admin_handlers
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "marsik_bot.db")
 
@@ -57,6 +58,12 @@ async def init_db():
                 comment TEXT
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS active_promotions (
+                reward_name TEXT PRIMARY KEY,
+                discount_percent INTEGER NOT NULL
+            )
+        """)
         await db.commit()
 
 asyncio.run(init_db())
@@ -98,6 +105,7 @@ register_favorites_handlers(app, DB_PATH)
 register_statistics_handlers(app, DB_PATH)   # Статистика
 register_post_handlers(app, DB_PATH)         # Пост для админов
 register_sticker_handlers(app)               # Ответ случайным стикером
+register_admin_handlers(app, DB_PATH)        # Админские slash-команды
 
 # --- Запуск бота ---
 app.run_polling()

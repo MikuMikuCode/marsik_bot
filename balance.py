@@ -4,6 +4,8 @@ import aiosqlite
 from telegram import Update
 from telegram.ext import CallbackQueryHandler, MessageHandler, filters, ConversationHandler, CommandHandler, ContextTypes
 
+from sheets_sync import append_transaction_to_sheet
+
 CHANGE_TAGS, CHANGE_AMOUNT, CHANGE_REASON = range(3)
 
 def register_balance_handlers(app, DB_PATH):
@@ -64,6 +66,7 @@ def register_balance_handlers(app, DB_PATH):
 
         await update.message.reply_text("⏳ Обрабатываю транзакции...")
 
+        sheet_transactions = []
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS transactions (
@@ -84,21 +87,33 @@ def register_balance_handlers(app, DB_PATH):
                     balance = (await cursor.fetchone())[0] or 0
                     new_balance = max(0, balance + amount)
                     actual_amount = new_balance - balance
+                    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
                     await db.execute("UPDATE users SET balance = ? WHERE telegram_id = ?", (new_balance, target_id))
-                    await db.execute(
+                    cursor = await db.execute(
                         """
                         INSERT INTO transactions (created_at, actor_tag, target_tag, amount, comment)
                         VALUES (?, ?, ?, ?, ?)
                         """,
                         (
-                            datetime.now().strftime("%d.%m.%Y %H:%M"),
+                            created_at,
                             actor_tag,
                             tag,
                             actual_amount,
                             reason,
                         ),
                     )
+                    sheet_transactions.append((
+                        cursor.lastrowid,
+                        created_at,
+                        actor_tag,
+                        tag,
+                        actual_amount,
+                        reason,
+                    ))
             await db.commit()
+
+        for transaction in sheet_transactions:
+            await append_transaction_to_sheet(*transaction)
 
         await update.message.reply_text("✅ Транзакции завершены.")
         return ConversationHandler.END

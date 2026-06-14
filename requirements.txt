@@ -1,2 +1,4 @@
 python-telegram-bot>=20.5
 aiosqlite
+google-api-python-client
+google-auth

@@ -5,6 +5,8 @@ import aiosqlite
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.ext import MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler, CommandHandler
 
+from sheets_sync import append_transaction_to_sheet
+
 BUY_NAME, CONFIRM = range(2)
 PROMO_ACTION, PROMO_REWARD, PROMO_PERCENT = range(3)
 SHOP_ACTION, SHOP_ADD_ITEMS, SHOP_REMOVE_ITEMS = range(3)
@@ -192,6 +194,8 @@ def register_rewards_handlers(app, DB_PATH):
                 return ConversationHandler.END
 
             new_balance = balance - cost
+            created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+            comment = f"Покупка награды: {reward_name}"
             await db.execute("UPDATE users SET balance = ? WHERE telegram_id = ?", (new_balance, telegram_id))
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS transactions (
@@ -203,20 +207,30 @@ def register_rewards_handlers(app, DB_PATH):
                     comment TEXT
                 )
             """)
-            await db.execute(
+            cursor = await db.execute(
                 """
                 INSERT INTO transactions (created_at, actor_tag, target_tag, amount, comment)
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (
-                    datetime.now().strftime("%d.%m.%Y %H:%M"),
+                    created_at,
                     user_tag,
                     user_tag,
                     -cost,
-                    f"Покупка награды: {reward_name}",
+                    comment,
                 ),
             )
+            transaction_id = cursor.lastrowid
             await db.commit()
+
+        await append_transaction_to_sheet(
+            transaction_id,
+            created_at,
+            user_tag,
+            user_tag,
+            -cost,
+            comment,
+        )
 
         await notify_purchase(context, user_tag, reward_name, cost)
         await query.message.reply_text(f"Спасибо за покупку! 🎉\nНовый баланс: {new_balance} 🪙")

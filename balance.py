@@ -67,6 +67,7 @@ def register_balance_handlers(app, DB_PATH):
         await update.message.reply_text("⏳ Обрабатываю транзакции...")
 
         sheet_transactions = []
+        balance_notifications = []
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS transactions (
@@ -110,12 +111,45 @@ def register_balance_handlers(app, DB_PATH):
                         actual_amount,
                         reason,
                     ))
+                    if actual_amount:
+                        balance_notifications.append((
+                            target_id,
+                            tag,
+                            actual_amount,
+                            new_balance,
+                        ))
             await db.commit()
+
+        notification_failures = []
+        for target_id, tag, actual_amount, new_balance in balance_notifications:
+            if actual_amount > 0:
+                title = "Вам начислили Марсики"
+            else:
+                title = "У вас списали Марсики"
+
+            text = (
+                f"{title}\n\n"
+                f"Сколько: {actual_amount:+d} MT\n"
+                f"От кого: {actor_tag}\n"
+                f"Комментарий: {reason}\n"
+                f"Новый баланс: {new_balance} MT"
+            )
+            try:
+                await context.bot.send_message(chat_id=target_id, text=text)
+            except Exception:
+                notification_failures.append(tag)
 
         for transaction in sheet_transactions:
             await append_transaction_to_sheet(*transaction)
 
-        await update.message.reply_text("✅ Транзакции завершены.")
+        if notification_failures:
+            failed = ", ".join(notification_failures)
+            await update.message.reply_text(
+                f"✅ Транзакции завершены.\n"
+                f"Не удалось отправить уведомления: {failed}"
+            )
+        else:
+            await update.message.reply_text("✅ Транзакции завершены.")
         return ConversationHandler.END
 
     conv = ConversationHandler(

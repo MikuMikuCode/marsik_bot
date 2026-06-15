@@ -123,16 +123,13 @@ def register_balance_handlers(app, DB_PATH):
         notification_failures = []
         for target_id, tag, actual_amount, new_balance in balance_notifications:
             if actual_amount > 0:
-                title = "Вам начислили Марсики"
+                action = "начислено"
             else:
-                title = "У вас списали Марсики"
+                action = "списано"
 
             text = (
-                f"{title}\n\n"
-                f"Сколько: {actual_amount:+d} MT\n"
-                f"От кого: {actor_tag}\n"
-                f"Комментарий: {reason}\n"
-                f"Новый баланс: {new_balance} MT"
+                f"Вам {action} {abs(actual_amount)} MT от {actor_tag}\n"
+                f"Комментарий: {reason}"
             )
             try:
                 await context.bot.send_message(chat_id=target_id, text=text)

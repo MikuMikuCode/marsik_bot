@@ -4,6 +4,7 @@ import aiosqlite
 from telegram import Update
 from telegram.ext import CallbackQueryHandler, MessageHandler, filters, ConversationHandler, CommandHandler, ContextTypes
 
+from balance_utils import get_user_balance
 from sheets_sync import append_transaction_to_sheet
 
 CHANGE_TAGS, CHANGE_AMOUNT, CHANGE_REASON = range(3)
@@ -84,40 +85,39 @@ def register_balance_handlers(app, DB_PATH):
                 actor_tag = actor_row[0] if actor_row and actor_row[0] else f"id:{actor_id}"
 
             for tag, target_id in tags:
-                async with db.execute("SELECT balance FROM users WHERE telegram_id = ?", (target_id,)) as cursor:
-                    balance = (await cursor.fetchone())[0] or 0
-                    new_balance = max(0, balance + amount)
-                    actual_amount = new_balance - balance
-                    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
-                    await db.execute("UPDATE users SET balance = ? WHERE telegram_id = ?", (new_balance, target_id))
-                    cursor = await db.execute(
-                        """
-                        INSERT INTO transactions (created_at, actor_tag, target_tag, amount, comment)
-                        VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (
-                            created_at,
-                            actor_tag,
-                            tag,
-                            actual_amount,
-                            reason,
-                        ),
-                    )
-                    sheet_transactions.append((
-                        cursor.lastrowid,
+                balance = await get_user_balance(db, target_id)
+                new_balance = max(0, balance + amount)
+                actual_amount = new_balance - balance
+                created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+                await db.execute("UPDATE users SET balance = ? WHERE telegram_id = ?", (new_balance, target_id))
+                cursor = await db.execute(
+                    """
+                    INSERT INTO transactions (created_at, actor_tag, target_tag, amount, comment)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
                         created_at,
                         actor_tag,
                         tag,
                         actual_amount,
                         reason,
+                    ),
+                )
+                sheet_transactions.append((
+                    cursor.lastrowid,
+                    created_at,
+                    actor_tag,
+                    tag,
+                    actual_amount,
+                    reason,
+                ))
+                if actual_amount:
+                    balance_notifications.append((
+                        target_id,
+                        tag,
+                        actual_amount,
+                        new_balance,
                     ))
-                    if actual_amount:
-                        balance_notifications.append((
-                            target_id,
-                            tag,
-                            actual_amount,
-                            new_balance,
-                        ))
             await db.commit()
 
         notification_failures = []

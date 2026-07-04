@@ -5,11 +5,14 @@ import aiosqlite
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.ext import MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler, CommandHandler
 
+from balance_utils import get_user_balance
 from sheets_sync import append_transaction_to_sheet
 
 BUY_NAME, CONFIRM = range(2)
 PROMO_ACTION, PROMO_REWARD, PROMO_PERCENT = range(3)
 SHOP_ACTION, SHOP_ADD_ITEMS, SHOP_REMOVE_ITEMS = range(3)
+
+MAX_TELEGRAM_TEXT_LENGTH = 3500
 
 
 def register_rewards_handlers(app, DB_PATH):
@@ -43,6 +46,27 @@ def register_rewards_handlers(app, DB_PATH):
         if discount_percent:
             return f"<s>{cost} MT</s> {final_cost} MT (скидка {discount_percent}%)"
         return f"{cost} MT"
+
+    async def reply_html_blocks(message, header, blocks, reply_markup=None):
+        chunks = []
+        current = header
+        for block in blocks:
+            if len(current) + len(block) > MAX_TELEGRAM_TEXT_LENGTH and current != header:
+                chunks.append(current)
+                current = block
+            else:
+                current += block
+
+        if current:
+            chunks.append(current)
+
+        for index, chunk in enumerate(chunks):
+            is_last = index == len(chunks) - 1
+            await message.reply_text(
+                chunk,
+                parse_mode="HTML",
+                reply_markup=reply_markup if is_last else None,
+            )
 
     async def notify_purchase(context, buyer_tag, reward_name, cost):
         text = (
@@ -83,17 +107,23 @@ def register_rewards_handlers(app, DB_PATH):
             """) as cursor:
                 rewards = await cursor.fetchall()
 
-        text = "<b>Магазин Марсика!</b>\n\n"
-        for name, description, cost, discount_percent in rewards:
-            price = format_reward_price(cost, discount_percent)
-            text += f"{price} — <b>«{escape(name)}»</b>\n<i>{escape(description or '')}</i>\n\n"
-
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("За что получить?", callback_data="how_to_earn")],
             [InlineKeyboardButton("Купить", callback_data="buy_reward")]
         ])
 
-        await update.message.reply_photo(photo=image_url, caption=text, parse_mode="HTML", reply_markup=keyboard)
+        await update.message.reply_photo(photo=image_url, caption="Магазин Марсика!")
+
+        if not rewards:
+            await update.message.reply_text("Магазин пока пуст.", reply_markup=keyboard)
+            return
+
+        blocks = []
+        for name, description, cost, discount_percent in rewards:
+            price = format_reward_price(cost, discount_percent)
+            blocks.append(f"{price} — <b>«{escape(name)}»</b>\n<i>{escape(description or '')}</i>\n\n")
+
+        await reply_html_blocks(update.message, "<b>Доступные награды:</b>\n\n", blocks, keyboard)
 
     # --- За что получить? через базу earn_rewards ---
     async def show_how_to_earn(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -116,11 +146,11 @@ def register_rewards_handlers(app, DB_PATH):
             await query.message.reply_text("Список пока пуст.")
             return
 
-        text = "<b>За что получить Марсики:</b>\n\n"
+        blocks = []
         for name, description, cost in rewards_list:
-            text += f"<b>«{escape(name)}»</b> — {cost} MT\n<i>{escape(description or '')}</i>\n\n"
+            blocks.append(f"<b>«{escape(name)}»</b> — {cost} MT\n<i>{escape(description or '')}</i>\n\n")
 
-        await query.message.reply_text(text, parse_mode="HTML")
+        await reply_html_blocks(query.message, "<b>За что получить Марсики:</b>\n\n", blocks)
 
     # --- Покупка ---
     async def start_buy_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -182,10 +212,10 @@ def register_rewards_handlers(app, DB_PATH):
         telegram_id = query.from_user.id
 
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT balance, tg_tag FROM users WHERE telegram_id = ?", (telegram_id,)) as cursor:
+            async with db.execute("SELECT tg_tag FROM users WHERE telegram_id = ?", (telegram_id,)) as cursor:
                 row = await cursor.fetchone()
-                balance = row[0] if row else 0
-                user_tag = row[1] if row and row[1] else f"id:{telegram_id}"
+                user_tag = row[0] if row and row[0] else f"id:{telegram_id}"
+            balance = await get_user_balance(db, telegram_id)
 
             if balance < cost:
                 await query.message.reply_text(
@@ -270,19 +300,74 @@ def register_rewards_handlers(app, DB_PATH):
             return ConversationHandler.END
 
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT name FROM rewards ORDER BY cost ASC") as cursor:
-                rewards = [row[0] for row in await cursor.fetchall()]
+            async with db.execute("SELECT COUNT(*) FROM rewards") as cursor:
+                rewards_count = (await cursor.fetchone())[0]
 
-        if not rewards:
+        if not rewards_count:
             await query.message.reply_text("Магазин пуст. Сначала добавь позиции через /shop.")
             return ConversationHandler.END
 
-        reward_list = "\n".join(f"- {name}" for name in rewards)
-        await query.message.reply_text(f"Напиши название позиции для акции:\n\n{reward_list}")
+        await query.message.reply_text(
+            "Отправь акции, каждую с новой строки:\n\n"
+            "Название позиции | Скидка\n\n"
+            "Пример:\n"
+            "Кофе | 10\n"
+            "Мерч | 25\n\n"
+            "Можно отправить и одно название без процента, тогда я спрошу скидку следующим сообщением."
+        )
         return PROMO_REWARD
 
     async def promo_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        reward_name = update.message.text.strip()
+        raw_text = update.message.text.strip()
+        lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+
+        if any("|" in line for line in lines):
+            added = []
+            skipped = []
+            async with aiosqlite.connect(DB_PATH) as db:
+                await ensure_reward_tables(db)
+                for line in lines:
+                    parts = [part.strip() for part in line.split("|", 1)]
+                    if len(parts) != 2 or not parts[0] or not parts[1]:
+                        skipped.append(line)
+                        continue
+
+                    reward_name, raw_percent = parts
+                    try:
+                        percent = int(raw_percent)
+                    except ValueError:
+                        skipped.append(line)
+                        continue
+
+                    if percent < 1 or percent > 99:
+                        skipped.append(line)
+                        continue
+
+                    async with db.execute("SELECT name FROM rewards WHERE name = ?", (reward_name,)) as cursor:
+                        row = await cursor.fetchone()
+                    if not row:
+                        skipped.append(f"{reward_name} не найдена")
+                        continue
+
+                    await db.execute(
+                        """
+                        INSERT OR REPLACE INTO active_promotions (reward_name, discount_percent)
+                        VALUES (?, ?)
+                        """,
+                        (reward_name, percent),
+                    )
+                    added.append(f"{reward_name} — {percent}%")
+                await db.commit()
+
+            text = "Готово."
+            if added:
+                text += "\nДобавлены акции:\n" + "\n".join(f"- {item}" for item in added)
+            if skipped:
+                text += "\n\nНе добавлены:\n" + "\n".join(f"- {item}" for item in skipped)
+            await update.message.reply_text(text)
+            return ConversationHandler.END
+
+        reward_name = raw_text
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT name FROM rewards WHERE name = ?", (reward_name,)) as cursor:
                 row = await cursor.fetchone()
@@ -352,10 +437,11 @@ def register_rewards_handlers(app, DB_PATH):
                 rewards = [row[0] for row in await cursor.fetchall()]
 
         reward_list = "\n".join(f"- {name}" for name in rewards) if rewards else "Магазин пуст."
-        await query.message.reply_text(
-            "Напиши названия позиций для удаления через запятую или каждую с новой строки:\n\n"
-            f"{reward_list}"
-        )
+        prompt = "Напиши названия позиций для удаления через запятую или каждую с новой строки:"
+        if len(reward_list) < 3000:
+            await query.message.reply_text(f"{prompt}\n\n{reward_list}")
+        else:
+            await query.message.reply_text(prompt)
         return SHOP_REMOVE_ITEMS
 
     async def shop_add_items(update: Update, context: ContextTypes.DEFAULT_TYPE):

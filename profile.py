@@ -2,17 +2,20 @@ import aiosqlite
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.ext import ConversationHandler, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
 
+from balance_utils import get_user_balance
+
 NAME, POSITION = range(2)
 
 def register_profile_handlers(app, DB_PATH):
     async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
-                "SELECT name, position, balance FROM users WHERE telegram_id = ?", 
+                "SELECT name, position FROM users WHERE telegram_id = ?",
                 (update.effective_user.id,)
             ) as cursor:
                 row = await cursor.fetchone()
-                name, position, balance = row if row else ("Не задано", "Не задано", 0)
+                name, position = row if row else ("Не задано", "Не задано")
+            balance = await get_user_balance(db, update.effective_user.id)
 
         text = f"Имя: {name}\nДолжность: {position}\nБаланс: {balance} MT"
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Изменить", callback_data="edit_profile")]])

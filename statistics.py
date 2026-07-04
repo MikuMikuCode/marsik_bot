@@ -2,6 +2,8 @@ import aiosqlite
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.ext import MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes, CommandHandler
 
+from balance_utils import get_top_balances, get_user_balance_by_tag
+
 CHANGE_TAGS = 0
 TRANSACTIONS_PER_PAGE = 15
 
@@ -20,8 +22,7 @@ def register_statistics_handlers(app, DB_PATH):
             return
 
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT name, tg_tag, balance FROM users ORDER BY balance DESC LIMIT 5") as cursor:
-                rows = await cursor.fetchall()
+            rows = await get_top_balances(db, 5)
 
         text = "🏆 Топ 5 пользователей по Марсикам:\n\n"
         for i, (name, tg_tag, balance) in enumerate(rows, 1):
@@ -101,12 +102,13 @@ def register_statistics_handlers(app, DB_PATH):
     async def user_stats_fetch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tag = update.message.text.strip()
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT name, tg_tag, position, balance FROM users WHERE tg_tag = ?", (tag,)) as cursor:
+            async with db.execute("SELECT name, tg_tag, position FROM users WHERE tg_tag = ?", (tag,)) as cursor:
                 row = await cursor.fetchone()
+            balance = await get_user_balance_by_tag(db, tag) if row else None
         if not row:
             await update.message.reply_text("Пользователь не найден или тег введен неверно.")
             return ConversationHandler.END
-        name, tg_tag, position, balance = row
+        name, tg_tag, position = row
         text = f"📊 Статистика пользователя:\nИмя: {name}\nТег: {tg_tag}\nДолжность: {position}\nБаланс: {balance} MT"
         await update.message.reply_text(text)
         return ConversationHandler.END
